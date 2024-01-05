@@ -26,6 +26,8 @@ struct uintr_upid {
 struct uintr_upid_ctx {
 	struct list_head node;
 	struct task_struct *task;	/* Receiver task */
+	u8 uinv; /* track MSR_IA32_UINTR_MISC.UINV */
+	bool suppressed; /* track UPID.STATUS.SN */
 	u64 uvec_mask;			/* track registered vectors per bit */
 	struct uintr_upid *upid;
 	/* TODO: Change to kernel kref api */

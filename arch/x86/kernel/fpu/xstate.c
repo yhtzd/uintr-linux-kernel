@@ -1865,11 +1865,13 @@ void *start_update_xsave_msrs(int xfeature_nr)
 		fpregs_restore_userregs();
 	return xstate;
 }
+EXPORT_SYMBOL(start_update_xsave_msrs);
 
 void end_update_xsave_msrs(void)
 {
 	fpregs_unlock();
 }
+EXPORT_SYMBOL(end_update_xsave_msrs);
 
 /*
  * When TIF_NEED_FPU_LOAD is set and fpregs_state_valid() is true, the saved
@@ -1909,6 +1911,7 @@ int xsave_rdmsrl(void *xstate, unsigned int msr, unsigned long long *p)
 
 	return 0;
 }
+EXPORT_SYMBOL(xsave_rdmsrl);
 
 int xsave_wrmsrl(void *xstate, u32 msr, u64 val)
 {
@@ -1926,6 +1929,7 @@ int xsave_wrmsrl(void *xstate, u32 msr, u64 val)
 
 	return 0;
 }
+EXPORT_SYMBOL(xsave_wrmsrl);
 
 int xsave_set_clear_bits_msrl(void *xstate, u32 msr, u64 set, u64 clear)
 {

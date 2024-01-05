@@ -1,3 +1,4 @@
+
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2021 - 2022, Intel Corporation.
@@ -960,6 +961,9 @@ static int do_uintr_register_handler(u64 handler, unsigned int flags)
 		t->thread.upid_ctx = upid_ctx;
 	}
 
+	upid_ctx->uinv = UINTR_NOTIFICATION_VECTOR;
+	upid_ctx->suppressed = false;
+
 	/*
 	 * UPID and upid_activated will be referenced during context switch. Need to
 	 * disable preemption while modifying the MSRs, UPID and upid_activated
@@ -1387,10 +1391,14 @@ void switch_uintr_return(void)
 
 	/* Modify only the relevant bits of the MISC MSR */
 	rdmsrl(MSR_IA32_UINTR_MISC, misc_msr);
-	if (!(misc_msr & GENMASK_ULL(39, 32))) {
-		misc_msr |= (u64)UINTR_NOTIFICATION_VECTOR << 32;
-		wrmsrl(MSR_IA32_UINTR_MISC, misc_msr);
-	}
+    misc_msr &= ~GENMASK_ULL(39, 32);
+    misc_msr |= (u64)current->thread.upid_ctx->uinv << 32;
+    wrmsrl(MSR_IA32_UINTR_MISC, misc_msr);
+	// if (!(misc_msr & GENMASK_ULL(39, 32))) {
+	// 	misc_msr |= (u64)UINTR_NOTIFICATION_VECTOR << 32;
+	// 	wrmsrl(MSR_IA32_UINTR_MISC, misc_msr);
+	// }
+
 
 	/*
 	 * It is necessary to clear the SN bit after we set UINV and NDST to
@@ -1398,7 +1406,11 @@ void switch_uintr_return(void)
 	 */
 	upid = current->thread.upid_ctx->upid;
 	upid->nc.ndst = cpu_to_ndst(smp_processor_id());
-	clear_bit(UINTR_UPID_STATUS_SN, (unsigned long *)&upid->nc.status);
+	if (current->thread.upid_ctx->suppressed)
+    	set_bit(UINTR_UPID_STATUS_SN, (unsigned long *)&upid->nc.status);
+	else
+		clear_bit(UINTR_UPID_STATUS_SN, (unsigned long *)&upid->nc.status);
+	// pr_info("switch_uintr_return: upid.puir %llx upid.nv %x upid.status %x uintr_misc %llx\n", upid->puir, upid->nc.nv, upid->nc.status, misc_msr);
 
 	/*
 	 * Interrupts might have accumulated in the UPID while the thread was
@@ -1412,7 +1424,7 @@ void switch_uintr_return(void)
 	 * the UIRR. In that case the kernel would need to carefully manage the
 	 * race with the hardware if the UPID gets updated after the read.
 	 */
-	if (READ_ONCE(upid->puir))
+	if (READ_ONCE(upid->puir) && !current->thread.upid_ctx->suppressed)
 		apic->send_IPI_self(UINTR_NOTIFICATION_VECTOR);
 }
 
