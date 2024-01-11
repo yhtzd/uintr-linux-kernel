@@ -25,6 +25,7 @@
 #include <asm/msr.h>
 #include <asm/msr-index.h>
 #include <asm/uintr.h>
+#include <asm/skyloft.h>
 
 #include <uapi/asm/uintr.h>
 
@@ -127,6 +128,8 @@ static struct uintr_upid_ctx *alloc_upid(void)
 	upid_ctx->task = get_task_struct(current);
 	upid_ctx->receiver_active = true;
 	upid_ctx->waiting = false;
+	upid_ctx->suppressed = false;
+	upid_ctx->timer_uintr = false;
 
 	return upid_ctx;
 }
@@ -869,6 +872,17 @@ static int do_uintr_unregister_handler(void)
 	pr_debug("recv: Unregister handler and clear MSRs for task=%d\n",
 		 t->pid);
 
+	upid_ctx = t->thread.upid_ctx;
+	//upid_ctx->receiver_active = false;
+
+	/*
+	 * Mask APIC timer before clear UINV, otherwise unexpected
+	 * kernel interrupts may happen.
+	 */
+	if (upid_ctx->timer_uintr && is_skyloft_enabled()) {
+		skyloft_lapic_mask();
+	}
+
 	/*
 	 * UPID and upid_activated will be referenced during context switch. Need to
 	 * disable preemption while modifying the MSRs, UPID and ui_recv thread
@@ -883,9 +897,6 @@ static int do_uintr_unregister_handler(void)
 	xsave_wrmsrl(xstate, MSR_IA32_UINTR_RR, 0);
 	xsave_wrmsrl(xstate, MSR_IA32_UINTR_STACKADJUST, 0);
 	xsave_wrmsrl(xstate, MSR_IA32_UINTR_HANDLER, 0);
-
-	upid_ctx = t->thread.upid_ctx;
-	//upid_ctx->receiver_active = false;
 
 	t->thread.upid_activated = false;
 
@@ -960,9 +971,6 @@ static int do_uintr_register_handler(u64 handler, unsigned int flags)
 			return -ENOMEM;
 		t->thread.upid_ctx = upid_ctx;
 	}
-
-	upid_ctx->uinv = UINTR_NOTIFICATION_VECTOR;
-	upid_ctx->suppressed = false;
 
 	/*
 	 * UPID and upid_activated will be referenced during context switch. Need to
@@ -1341,6 +1349,13 @@ void switch_uintr_prepare(struct task_struct *prev)
 	upid_ctx = prev->thread.upid_ctx;
 
 	/*
+	 * Mask APIC timer when switching out a uintr receiver
+	 */
+	if (upid_ctx->timer_uintr && is_skyloft_enabled()) {
+		skyloft_lapic_mask();
+	}
+
+	/*
 	 * A task being interruptible is a dynamic state. Need synchronization
 	 * in schedule() along with singal_pending_state() to avoid blocking if
 	 * a UINTR is pending
@@ -1367,10 +1382,15 @@ void switch_uintr_prepare(struct task_struct *prev)
 void switch_uintr_return(void)
 {
 	struct uintr_upid *upid;
+	struct uintr_upid_ctx *upid_ctx;
 	u64 misc_msr;
+	u64 uinv;
 
 	if (!is_uintr_receiver(current))
 		return;
+
+	upid_ctx = current->thread.upid_ctx;
+	uinv = upid_ctx->suppressed ? UINTR_SKYLOFT_VECTOR : UINTR_NOTIFICATION_VECTOR;
 
 	/*
 	 * The XSAVES instruction clears the UINTR notification vector(UINV) in
@@ -1391,26 +1411,31 @@ void switch_uintr_return(void)
 
 	/* Modify only the relevant bits of the MISC MSR */
 	rdmsrl(MSR_IA32_UINTR_MISC, misc_msr);
-    misc_msr &= ~GENMASK_ULL(39, 32);
-    misc_msr |= (u64)current->thread.upid_ctx->uinv << 32;
-    wrmsrl(MSR_IA32_UINTR_MISC, misc_msr);
-	// if (!(misc_msr & GENMASK_ULL(39, 32))) {
-	// 	misc_msr |= (u64)UINTR_NOTIFICATION_VECTOR << 32;
-	// 	wrmsrl(MSR_IA32_UINTR_MISC, misc_msr);
-	// }
-
+	if ((misc_msr & GENMASK_ULL(39, 32)) != uinv) {
+		misc_msr &= ~GENMASK_ULL(39, 32);
+		misc_msr |= uinv << 32;
+		wrmsrl(MSR_IA32_UINTR_MISC, misc_msr);
+	}
 
 	/*
 	 * It is necessary to clear the SN bit after we set UINV and NDST to
 	 * avoid incorrect interrupt routing.
 	 */
-	upid = current->thread.upid_ctx->upid;
+	upid = upid_ctx->upid;
 	upid->nc.ndst = cpu_to_ndst(smp_processor_id());
-	if (current->thread.upid_ctx->suppressed)
-    	set_bit(UINTR_UPID_STATUS_SN, (unsigned long *)&upid->nc.status);
+	if (upid_ctx->suppressed)
+		set_bit(UINTR_UPID_STATUS_SN, (unsigned long *)&upid->nc.status);
 	else
 		clear_bit(UINTR_UPID_STATUS_SN, (unsigned long *)&upid->nc.status);
-	// pr_info("switch_uintr_return: upid.puir %llx upid.nv %x upid.status %x uintr_misc %llx\n", upid->puir, upid->nc.nv, upid->nc.status, misc_msr);
+
+	/*
+	 * Unmask APIC timer before going back to userspace if the current task
+	 * supports device interrupts and the current CPU is bound to the APIC
+	 * timer.
+	 */
+	if (upid_ctx->timer_uintr && is_skyloft_enabled()) {
+		skyloft_lapic_unmask();
+	}
 
 	/*
 	 * Interrupts might have accumulated in the UPID while the thread was
@@ -1424,7 +1449,7 @@ void switch_uintr_return(void)
 	 * the UIRR. In that case the kernel would need to carefully manage the
 	 * race with the hardware if the UPID gets updated after the read.
 	 */
-	if (READ_ONCE(upid->puir) && !current->thread.upid_ctx->suppressed)
+	if (READ_ONCE(upid->puir) && !upid_ctx->suppressed)
 		apic->send_IPI_self(UINTR_NOTIFICATION_VECTOR);
 }
 
@@ -1491,6 +1516,11 @@ void uintr_free(struct task_struct *t)
 
 	upid_ctx = t->thread.upid_ctx;
 	if (is_uintr_task(t)) {
+		/* Mask APIC timer on thread exit */
+		if (is_skyloft_enabled()) {
+			skyloft_lapic_mask();
+		}
+
 		xstate = start_update_xsave_msrs(XFEATURE_UINTR);
 
 		xsave_wrmsrl(xstate, MSR_IA32_UINTR_MISC, 0);

@@ -107,6 +107,7 @@
 /* Vector for User interrupt notifications */
 #define UINTR_NOTIFICATION_VECTOR       0xec
 #define UINTR_KERNEL_VECTOR		0xeb
+#define UINTR_SKYLOFT_VECTOR		0xe0
 
 #define LOCAL_TIMER_VECTOR		0xea
 

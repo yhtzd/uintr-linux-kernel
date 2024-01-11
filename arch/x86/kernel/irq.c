@@ -194,6 +194,11 @@ int arch_show_interrupts(struct seq_file *p, int prec)
 		for_each_online_cpu(j)
 			seq_printf(p, "%10u ", irq_stats(j)->uintr_kernel_notifications);
 		seq_puts(p, "  User-interrupt kernel notification event\n");
+
+		seq_printf(p, "%*s: ", prec, "SKY");
+		for_each_online_cpu(j)
+			seq_printf(p, "%10u ", irq_stats(j)->skyloft_timer_spurious_count);
+		seq_puts(p, "  Skyloft spurious event\n");
 	}
 #endif
 	return 0;
@@ -396,6 +401,17 @@ DEFINE_IDTENTRY_SYSVEC(sysvec_uintr_kernel_notification)
 
 	if (IS_ENABLED(CONFIG_X86_UINTR_BLOCKING))
 		uintr_wake_up_process();
+}
+
+DEFINE_IDTENTRY_SYSVEC(sysvec_skyloft_spurious_interrupt)
+{
+	u64 misc_msr;
+	ack_APIC_irq();
+	inc_irq_stat(skyloft_timer_spurious_count);
+
+	rdmsrl(MSR_IA32_UINTR_MISC, misc_msr);
+	pr_warn_ratelimited("skyloft_spurious_interrupt: MSR_IA32_UINTR_MISC=%llx, pid=%d, CPU=%d\n",
+			    misc_msr, current->pid, smp_processor_id());
 }
 #endif
 

@@ -26,14 +26,14 @@ struct uintr_upid {
 struct uintr_upid_ctx {
 	struct list_head node;
 	struct task_struct *task;	/* Receiver task */
-	u8 uinv; /* track MSR_IA32_UINTR_MISC.UINV */
-	bool suppressed; /* track UPID.STATUS.SN */
 	u64 uvec_mask;			/* track registered vectors per bit */
 	struct uintr_upid *upid;
 	/* TODO: Change to kernel kref api */
 	refcount_t refs;
 	bool receiver_active;		/* Flag for UPID being mapped to a receiver */
 	bool waiting;			/* Flag for UPID blocked in the kernel */
+	bool suppressed;		/* Flag for suppressed notification to support device interrupts */
+	bool timer_uintr;		/* Flag for timer interrupts being delegated to userspace */
 	unsigned int waiting_cost;	/* Flags for who pays the waiting cost */
 };
 
