@@ -403,15 +403,29 @@ DEFINE_IDTENTRY_SYSVEC(sysvec_uintr_kernel_notification)
 		uintr_wake_up_process();
 }
 
+static void (*skyloft_interrupt_handler)(void) = NULL;
+
+void set_skyloft_intrrupt_handler(void (*handler)(void))
+{
+	skyloft_interrupt_handler = handler;
+}
+EXPORT_SYMBOL_GPL(set_skyloft_intrrupt_handler);
+
 DEFINE_IDTENTRY_SYSVEC(sysvec_skyloft_spurious_interrupt)
 {
+	struct pt_regs *old_regs = set_irq_regs(regs);
+
 	u64 misc_msr;
 	ack_APIC_irq();
 	inc_irq_stat(skyloft_timer_spurious_count);
+	if (skyloft_interrupt_handler)
+		skyloft_interrupt_handler();
 
 	rdmsrl(MSR_IA32_UINTR_MISC, misc_msr);
 	pr_warn_ratelimited("skyloft_spurious_interrupt: MSR_IA32_UINTR_MISC=%llx, pid=%d, CPU=%d\n",
 			    misc_msr, current->pid, smp_processor_id());
+	set_irq_regs(old_regs);
+
 }
 #endif
 
